@@ -1,0 +1,156 @@
+# A2G RAG System
+
+A FastAPI backend for policy and procedure Retrieval-Augmented Generation (RAG).
+
+## Project Goal
+
+The A2G RAG System is designed to provide efficient retrieval and access to policy and procedure documents. It leverages vector embeddings for semantic search capabilities and implements a RAG architecture to enhance information retrieval accuracy.
+
+## Runtime Flowchart
+
+```
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│                 │      │                 │      │                 │
+│  Client Request ├─────►│  FastAPI Server ├─────►│ Query Processing│
+│                 │      │                 │      │                 │
+└─────────────────┘      └─────────────────┘      └────────┬────────┘
+                                                           │
+                                                           ▼
+┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+│                 │      │                 │      │                 │
+│    Response     │◄─────┤  RAG Pipeline   │◄─────┤ Vector Retrieval│
+│                 │      │                 │      │                 │
+└─────────────────┘      └─────────────────┘      └────────┬────────┘
+                                                           │
+                                                           ▼
+                                                  ┌─────────────────┐
+                                                  │                 │
+                                                  │  Qdrant Vector  │
+                                                  │    Database     │
+                                                  │                 │
+                                                  └─────────────────┘
+```
+
+## Quickstart Guide
+
+### Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/a2g.git
+   cd a2g
+   ```
+
+2. **Set up a virtual environment:**
+   ```bash
+   python -m venv venv
+   .\venv\Scripts\Activate.ps1
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Create a `.env` file in the project root:**
+   ```
+   DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/a2g
+   QDRANT_HOST=localhost
+   QDRANT_PORT=6333
+   QDRANT_COLLECTION_NAME=a2g_chunks
+   ```
+
+5. **Start PostgreSQL:**
+   ```bash
+   # If using Docker
+   docker run --name postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=a2g -p 5432:5432 -d postgres
+   ```
+
+6. **Start Qdrant Vector Database:**
+   ```bash
+   # If using Docker
+   docker run -p 6333:6333 -p 6334:6334 -v $(pwd)/qdrant_data:/qdrant/storage qdrant/qdrant
+   ```
+
+### Run
+
+1. **Start the API server:**
+   ```bash
+   python main.py
+   ```
+
+2. **Access the API documentation:**
+   Open your browser and navigate to `http://localhost:8000/docs` to see the Swagger UI documentation.
+
+### Processing PDF Policies
+
+You can process PDFs into policies using the command-line tool:
+
+```bash
+# Process a single PDF
+python process_pdf_policy.py pdf path/to/document.pdf --title "Policy Title" --issuer "Organization Name"
+
+# Process all PDFs in a directory
+python process_pdf_policy.py dir path/to/policy/folder/
+
+# View chunks without storing in database
+python process_pdf_policy.py view path/to/document.pdf --count
+```
+
+**Options:**
+- `--min-tokens`: Minimum tokens per chunk (default: 200)
+- `--max-tokens`: Maximum tokens per chunk (default: 400)
+- `--output`: Save chunks to JSON file
+- `--skip-db`: Skip database loading (JSON only)
+- `--issuer`: Policy issuer organization name
+
+### Test
+
+1. **Run tests:**
+   ```bash
+   # To be implemented: pytest command
+   ```
+
+2. **Sample API query:**
+   ```bash
+   curl -X POST "http://localhost:8000/api/v1/query" -H "Content-Type: application/json" -d '{"query": "what is the policy for remote work?"}'
+   ```
+
+## Project Structure
+
+- `main.py`: Application entry point
+- `process_pdf_policy.py`: CLI tool for processing PDFs into policies
+- `src/api/`: API routes and endpoints
+- `src/core/`: Core configuration and database setup
+- `src/ingest/`: Data ingestion and indexing utilities
+  - `pdf/`: PDF processing modules
+    - `extractor.py`: Extract text from PDFs with metadata
+    - `policy_processor.py`: Process PDFs into policy objects
+- `src/models/`: Database models
+  - `policy.py`: Policy model
+  - `procedure.py`: Procedure model
+  - `source.py`: Source model
+  - `chunk.py`: Text chunk model
+- `src/rag/`: RAG implementation (retriever, reranker, router)
+- `src/scripts/`: Utility scripts for evaluation and data seeding
+
+## Architecture
+
+The system consists of the following components:
+
+1. **Ingest**: Processes documents (PDF, JSON) into database records
+   - PDF Extractor: Extracts text from PDFs with metadata
+   - Chunker: Splits text into appropriately sized chunks (200-400 tokens)
+
+2. **Database**: Stores policies, procedures, sources, and chunks
+   - Uses SQLAlchemy 2.0 with async support
+   - Supports PostgreSQL and SQLite
+
+3. **Vector Store**: Stores and retrieves embeddings
+   - Uses Qdrant for vector storage
+   - Embeds text chunks for semantic search
+
+4. **API**: Provides RESTful endpoints
+   - Search policies
+   - Retrieve chunks
+   - Query using natural language

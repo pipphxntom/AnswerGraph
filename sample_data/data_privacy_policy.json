@@ -1,0 +1,60 @@
+{
+  "policy_id": "POL-2023-001",
+  "title": "Data Privacy Policy",
+  "issuer": "IT Department",
+  "source_url": "https://example.com/policies/data-privacy",
+  "effective_from": "2023-01-01",
+  "last_updated": "2023-06-15",
+  "procedures": [
+    {
+      "id": "PROC-2023-001-1",
+      "name": "Data Access Request Procedure",
+      "applies_to": {
+        "departments": ["All"],
+        "roles": ["Data Owner", "Privacy Officer"]
+      },
+      "deadlines": {
+        "response_time": "30 days",
+        "extension_allowed": "60 days with notification"
+      },
+      "fees": {
+        "standard_request": "No fee",
+        "complex_request": "Administrative cost only"
+      },
+      "contacts": {
+        "primary": "privacy@example.com",
+        "secondary": "dpo@example.com"
+      }
+    },
+    {
+      "id": "PROC-2023-001-2",
+      "name": "Data Breach Notification Procedure",
+      "applies_to": {
+        "departments": ["All"],
+        "roles": ["IT Security", "Privacy Officer", "Department Head"]
+      },
+      "deadlines": {
+        "internal_notification": "24 hours",
+        "regulatory_notification": "72 hours",
+        "affected_individuals": "Without undue delay"
+      },
+      "contacts": {
+        "primary": "security@example.com",
+        "emergency": "security-emergency@example.com"
+      }
+    }
+  ],
+  "citations": [
+    {
+      "url": "https://example.com/policies/data-privacy",
+      "page": 1,
+      "text": "This policy establishes the principles for protecting personal data within the organization."
+    },
+    {
+      "url": "https://example.com/regulations/gdpr",
+      "page": 5,
+      "text": "Article 15 GDPR: Right of access by the data subject"
+    }
+  ],
+  "text_full": "# Data Privacy Policy\n\n## Purpose\nThis policy establishes the principles and practices for protecting personal data within our organization.\n\n## Scope\nThis policy applies to all employees, contractors, and third parties who process personal data on behalf of our organization.\n\n## Principles\n1. Personal data shall be processed lawfully, fairly, and transparently.\n2. Personal data shall be collected for specified, explicit, and legitimate purposes.\n3. Personal data shall be adequate, relevant, and limited to what is necessary.\n4. Personal data shall be accurate and kept up to date.\n5. Personal data shall be kept in a form which permits identification for no longer than necessary.\n6. Personal data shall be processed securely."
+}

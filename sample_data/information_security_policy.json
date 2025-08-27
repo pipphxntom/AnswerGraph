@@ -1,0 +1,56 @@
+{
+  "policy_id": "POL-2023-002",
+  "title": "Information Security Policy",
+  "issuer": "IT Security Department",
+  "source_url": "https://example.com/policies/information-security",
+  "effective_from": "2023-02-15",
+  "last_updated": "2023-07-10",
+  "procedures": [
+    {
+      "id": "PROC-2023-002-1",
+      "name": "Password Management Procedure",
+      "applies_to": {
+        "departments": ["All"],
+        "roles": ["All Staff"]
+      },
+      "deadlines": {
+        "password_rotation": "Every 90 days",
+        "account_lockout": "After 5 failed attempts"
+      },
+      "contacts": {
+        "primary": "itsupport@example.com",
+        "helpdesk": "helpdesk@example.com"
+      }
+    },
+    {
+      "id": "PROC-2023-002-2",
+      "name": "Access Control Procedure",
+      "applies_to": {
+        "departments": ["All"],
+        "roles": ["System Administrators", "Department Managers"]
+      },
+      "deadlines": {
+        "access_review": "Quarterly",
+        "provisioning": "Within 48 hours of request",
+        "deprovisioning": "Within 24 hours of termination"
+      },
+      "contacts": {
+        "primary": "access.control@example.com",
+        "escalation": "security.manager@example.com"
+      }
+    }
+  ],
+  "citations": [
+    {
+      "url": "https://example.com/policies/information-security",
+      "page": 1,
+      "text": "This policy establishes the requirements for protecting the confidentiality, integrity, and availability of information assets."
+    },
+    {
+      "url": "https://example.com/standards/iso27001",
+      "page": 12,
+      "text": "ISO/IEC 27001:2013 A.9.4: System and application access control"
+    }
+  ],
+  "text_full": "# Information Security Policy\n\n## Purpose\nThis policy establishes the requirements for protecting the confidentiality, integrity, and availability of information assets within our organization.\n\n## Scope\nThis policy applies to all information assets, including systems, applications, data, and infrastructure, regardless of their form or location.\n\n## Requirements\n1. All information assets must be classified according to their sensitivity and criticality.\n2. Access to information assets must be restricted based on the principle of least privilege.\n3. All systems and applications must implement appropriate security controls.\n4. All users must be authenticated and authorized before accessing information assets.\n5. All security incidents must be reported and managed according to the established incident response procedure."
+}

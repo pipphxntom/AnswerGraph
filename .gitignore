@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dylib
+*.egg-info/
+.eggs/
+.dist-info/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Caches / test artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+hmlcov/
+htmlcov/
+.cache/
+.mypy_cache/
+.pytype/
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+logs/
+*.log
+
+# Local data and DBs
+/data/
+qdrant_data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Outputs / demos
+outputs/
+results/
+demo_results_*.json
+
+# Frontend (if present)
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Hugging Face / Transformers caches (if configured locally within repo)
+hf_cache/
+huggingface_cache/
+transformers_cache/
+
+# Alembic bytecode
+alembic/versions/*.pyc
+
+# Temporary files
+*.tmp
+*.temp
+~$*
