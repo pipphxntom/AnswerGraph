@@ -12,12 +12,13 @@ import asyncio
 from src.core.db import get_session
 from src.core.rule_settings import RULE_INTENTS, STATS
 from src.rag.intent_classifier import classify_intent_and_slots
-from src.rag.rule_answers import answer_from_rules, AnswerContract
+from src.nlp.lang import detect_lang, normalize_hinglish
+from src.answers.rules_path import answer_from_rules, NoAnswer
 from src.rag.retriever import retrieve_documents
 from src.rag.reranker import rerank_documents, cross_encode_rerank
-from src.rag.guards import validate_query, require_citation, numeric_consistency, confidence_gate
-from src.rag.deterministic_fetch import deterministic_fetch
-from src.rag.composer import compose_answer
+from src.rag.guards import apply_guards, validate_query
+from src.rag.composer import compose_rag_answer
+from src.schemas.answer import AnswerContract, GuardDecision
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -45,13 +46,17 @@ class SourceInfo(BaseModel):
 
 class AskResponse(BaseModel):
     """Model for ask responses."""
-    text: str
-    sources: List[SourceInfo] = []
+    mode: str  # "rules" | "rag" | "fallback" | "disambiguation"
     intent: Optional[str] = None
-    slots: Optional[Dict[str, str]] = None
+    text: Optional[str] = None
+    answer: Optional[str] = None  # New field for standardized output
+    sources: List[SourceInfo] = []
     confidence: Optional[float] = None
     processing_time: Optional[float] = None
     updated_date: Optional[str] = None
+    reasons: Optional[List[str]] = None
+    ticket_id: Optional[str] = None
+    chips: Optional[Dict[str, List[Any]]] = None
 
 
 class HealthResponse(BaseModel):
@@ -106,132 +111,113 @@ def update_stats(
     STATS["avg_response_time"] = sum(STATS["response_times"]) / len(STATS["response_times"])
 
 
-async def compose_rag_answer(
-    query: str,
-    retrieved_docs: List[Dict[str, Any]],
-    slots: Optional[Dict[str, str]] = None,
-    session: AsyncSession = None
-) -> AskResponse:
+async def get_newest_policy_date(sources: List[Dict[str, Any]], session: AsyncSession) -> Optional[str]:
     """
-    Compose an answer using RAG from retrieved documents.
-    
-    Uses the compose_answer function with an LLM to generate a structured response.
-    Falls back to deterministic fetch for certain query types.
+    Get the date of the newest policy mentioned in the sources.
     
     Args:
-        query: The user's query
-        retrieved_docs: The retrieved documents
-        slots: Any extracted slots
+        sources: List of sources referenced in the answer
         session: Database session
         
     Returns:
-        AskResponse object
+        ISO format date string of the newest policy, or None if no dates found
     """
-    # First check if we can use deterministic fetch for structured answer
-    if session and slots and "program" in slots:
-        try:
-            # Try deterministic fetch with program info
-            result = await deterministic_fetch(
-                session=session,
-                query_type="program_info",
-                params={"program": slots["program"], "term": slots.get("semester")}
-            )
-            
-            if result and result.get("answer") and result.get("source", {}).get("url"):
-                # Create sources list
-                sources = []
-                if result.get("source"):
-                    source = result["source"]
-                    if source.get("url"):
-                        sources.append(SourceInfo(
-                            policy_id=result.get("policy", {}).get("id"),
-                            url=source.get("url"),
-                            page=source.get("page"),
-                            name=source.get("title")
-                        ))
-                
-                return AskResponse(
-                    text=result["answer"],
-                    sources=sources,
-                    intent="freeform",
-                    slots=slots,
-                    confidence=0.8,
-                    updated_date=result.get("source", {}).get("updated_at")
-                )
-        except Exception as e:
-            logger.error(f"Error in deterministic fetch during compose_rag_answer: {str(e)}")
+    if not sources or not session:
+        return None
     
-    # Fall back to simple document-based answer
-    if not retrieved_docs:
-        return AskResponse(
-            text="I'm sorry, I couldn't find any relevant information for your query.",
-            sources=[],
-            intent="freeform",
-            slots=slots or {},
-            confidence=0.0
-        )
-    
-    # Create evidence list for LLM
-    evidence = []
-    for doc in retrieved_docs:
-        evidence.append({
-            "text": doc.get("content", ""),
-            "metadata": {
-                "policy_id": doc.get("policy_id"),
-                "url": doc.get("url", f"/documents/{doc.get('id')}"),
-                "name": doc.get("source_name", "Document"),
-                "page": doc.get("page_number"),
-                "section": doc.get("section")
-            }
-        })
-    
-    # Use LLM to compose answer
     try:
-        answer_result = compose_answer(query, evidence)
+        from sqlalchemy import select, func
+        from src.models.policy import Policy
         
-        # Extract the answer text and validate
-        answer_text = answer_result.get("answer", "")
+        # Extract policy IDs from sources
+        policy_ids = []
+        for source in sources:
+            if source.get("policy_id"):
+                policy_ids.append(source["policy_id"])
         
-        # Check if the answer passes numeric consistency
-        if not numeric_consistency(answer_text, [doc.get("content", "") for doc in retrieved_docs]):
-            logger.warning(f"Answer failed numeric consistency check: {answer_text[:100]}...")
-            answer_text = "I found some information, but there might be numerical inconsistencies. " + answer_text
+        if not policy_ids:
+            return None
         
-        # Check if the answer has citations
-        if not require_citation(answer_text):
-            logger.warning(f"Answer failed citation check: {answer_text[:100]}...")
-            answer_text += "\n\nPlease refer to the sources below for more information."
-    
-    except Exception as e:
-        logger.error(f"Error in LLM answer composition: {str(e)}")
-        # Fallback to simpler answer
-        answer_text = retrieved_docs[0].get("content", "")
-        if len(answer_text) > 300:
-            answer_text = answer_text[:300] + "..."
-    
-    # Create sources list
-    sources = []
-    for doc in retrieved_docs[:3]:  # Include top 3 sources
-        source = SourceInfo(
-            policy_id=doc.get("policy_id"),
-            url=doc.get("url", f"/documents/{doc.get('id')}"),
-            name=doc.get("source_name", "Document"),
-            page=doc.get("page_number"),
-            section=doc.get("section")
+        # Query for the newest effective_from date
+        stmt = select(func.max(Policy.effective_from)).where(
+            Policy.id.in_(policy_ids)
         )
-        sources.append(source)
+        
+        result = await session.execute(stmt)
+        newest_date = result.scalar_one_or_none()
+        
+        if newest_date:
+            return newest_date.isoformat()
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting newest policy date: {str(e)}")
+        return None
+
+
+def slots_complete(slots: Dict[str, Any], required_slots: List[str] = None) -> bool:
+    """
+    Check if all required slots are present in the extracted slots.
     
-    # Compute confidence based on answer quality and source scores
-    confidence = min(0.9, retrieved_docs[0].get("score", 0.5) * 1.2) if retrieved_docs else 0.0
+    Args:
+        slots: Extracted slots from query
+        required_slots: List of slot names that must be present
+        
+    Returns:
+        True if all required slots are present
+    """
+    if not required_slots:
+        # Different intents have different required slots
+        return True
+        
+    return all(slot in slots and slots[slot] for slot in required_slots)
+
+
+async def create_ticket_if_enabled(
+    contract: AnswerContract, 
+    reasons: List[str],
+    session: Optional[AsyncSession] = None
+) -> Optional[str]:
+    """
+    Create a ticket for failed guard checks if the feature is enabled.
     
-    return AskResponse(
-        text=answer_text,
-        sources=sources,
-        intent="freeform",
-        slots=slots or {},
-        confidence=confidence,
-        updated_date=retrieved_docs[0].get("updated_date")
-    )
+    Args:
+        contract: The answer contract that failed validation
+        reasons: List of reasons why validation failed
+        session: Database session
+        
+    Returns:
+        Ticket ID if created, None otherwise
+    """
+    # This is a placeholder - in a real system, you would implement
+    # ticket creation in your preferred ticketing system.
+    
+    logger.warning(f"Answer failed guard checks: {reasons}")
+    
+    try:
+        # Set a timeout for ticket creation to ensure non-blocking
+        async with asyncio.timeout(2.0):  # 2 second timeout
+            # Generate a simple ticket ID for demonstration
+            import uuid
+            import datetime
+            
+            ticket_prefix = "A2G"
+            date_part = datetime.datetime.now().strftime("%Y%m%d")
+            unique_part = str(uuid.uuid4())[:8]
+            
+            ticket_id = f"{ticket_prefix}-{date_part}-{unique_part}"
+            
+            # In a real implementation, you would store the ticket in a database
+            # or call an external ticketing API here
+            
+            logger.info(f"Created ticket {ticket_id} for failed guard checks: {reasons}")
+            return ticket_id
+    except asyncio.TimeoutError:
+        logger.error("Ticket creation timed out after 2 seconds")
+        return "TIMEOUT-TICKET"
+    except Exception as e:
+        logger.error(f"Failed to create ticket: {str(e)}")
+        return None
 
 
 @ask_router.post("/ask", response_model=AskResponse)
@@ -244,9 +230,12 @@ async def ask(
     Ask endpoint for handling both rule-based and RAG-based queries.
     
     Steps:
-    1. Classify intent and extract slots
-    2. If rule-based intent with sufficient slots, use rule-based answer
-    3. Otherwise, use RAG pipeline: retrieve → rerank → compose
+    1. Language detection and normalization
+    2. Classify intent and extract slots
+    3. If rule-based intent with sufficient slots, use rule-based answer
+    4. Otherwise, use RAG pipeline: retrieve → rerank → compose
+    5. Apply guards to validate the answer
+    6. Return answer or fallback response
     
     Args:
         request: The ask request
@@ -263,92 +252,146 @@ async def ask(
     if not validation_result["valid"]:
         raise HTTPException(status_code=400, detail=validation_result["message"])
     
-    # 1. Classify intent and extract slots
-    intent, slots, confidence = classify_intent_and_slots(request.text)
+    # 1. Language detection and normalization
+    lang = detect_lang(request.text)
+    normalized_query = normalize_hinglish(request.text) if lang == "hi-en" else request.text
     
-    # 2. Rule-based answer if applicable
-    is_rule_based = False
-    if intent in RULE_INTENTS and confidence >= 0.6:
+    # 2. Classify intent and extract slots
+    intent, slots, intent_confidence = classify_intent_and_slots(normalized_query)
+    
+    # Check if disambiguation is needed
+    slot_coverage = len(slots) / 3.0  # Example metric - adjust based on your needs
+    if slot_coverage < 0.5 and intent in RULE_INTENTS:
+        # Return disambiguation response
+        chips = {}
+        if "program" not in slots:
+            chips["program"] = ["BTech", "BBA", "MBA", "MTech"]
+        if "semester" not in slots:
+            chips["semester"] = [1, 2, 3, 4, 5, 6, 7, 8]
+            
+        return AskResponse(
+            mode="disambiguation",
+            intent=intent,
+            text="Could you please provide more details?",
+            confidence=intent_confidence,
+            processing_time=round((time.time() - start_time) * 1000, 2),
+            chips=chips
+        )
+    
+    # 3. Rule-based answer if applicable
+    contract = None
+    if intent in RULE_INTENTS and intent_confidence >= 0.6 and slots_complete(slots):
         try:
-            rule_answer = await answer_from_rules(intent, slots, session)
-            if rule_answer:
-                # Convert to response model
-                response = AskResponse(
-                    text=rule_answer.text,
-                    sources=[SourceInfo(**source) for source in rule_answer.sources],
-                    intent=rule_answer.intent,
-                    slots=rule_answer.slots,
-                    confidence=rule_answer.confidence,
-                    processing_time=round((time.time() - start_time) * 1000, 2),
-                    updated_date=rule_answer.updated_date
-                )
-                is_rule_based = True
-                
-                # Update stats in background
-                background_tasks.add_task(
-                    update_stats, 
-                    intent, 
-                    is_rule_based, 
-                    (time.time() - start_time) * 1000
-                )
-                
-                return response
+            contract = await answer_from_rules(intent, slots, session)
+        except NoAnswer as e:
+            logger.info(f"No rule-based answer available: {str(e)}")
+            # Fall back to RAG pipeline
         except Exception as e:
             logger.error(f"Error in rule-based answer: {str(e)}")
             # Fall back to RAG pipeline
     
-    # 3. RAG pipeline
-    try:
-        # Retrieve documents
-        retrieval_results = await retrieve_documents(
-            query=request.text,
-            limit=10
-        )
-        
-        # Rerank if we have enough documents
-        if len(retrieval_results) > 1:
-            # First pass with simple reranker
-            reranked_results = rerank_documents(
-                query=request.text,
-                documents=retrieval_results
+    # 4. RAG pipeline if no rule-based answer
+    if not contract:
+        try:
+            # Retrieve documents
+            retrieval_results = await retrieve_documents(
+                query=normalized_query,
+                limit=10
             )
             
-            # Second pass with cross-encoder
-            if len(reranked_results) > 0:
-                final_results = cross_encode_rerank(
-                    query=request.text,
-                    candidates=reranked_results,
-                    top_n=5
+            # Rerank if we have enough documents
+            if len(retrieval_results) > 1:
+                # First pass with simple reranker
+                reranked_results = rerank_documents(
+                    query=normalized_query,
+                    documents=retrieval_results
                 )
+                
+                # Second pass with cross-encoder
+                if len(reranked_results) > 0:
+                    final_results = cross_encode_rerank(
+                        query=normalized_query,
+                        candidates=reranked_results,
+                        top_n=5
+                    )
+                else:
+                    final_results = reranked_results
             else:
-                final_results = reranked_results
-        else:
-            final_results = retrieval_results
-        
-        # Compose answer
-        response = await compose_rag_answer(
-            query=request.text,
-            retrieved_docs=final_results,
-            slots=slots,
+                final_results = retrieval_results
+            
+            # Compose answer
+            contract = await compose_rag_answer(
+                query=normalized_query,
+                retrieved_docs=final_results,
+                slots=slots,
+                session=session
+            )
+        except Exception as e:
+            logger.error(f"Error in RAG pipeline: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+    
+    # 5. Apply guards to validate the answer
+    sources = [s.model_dump() for s in contract.sources]
+    newest_date = await get_newest_policy_date(sources, session)
+    lang_ok = lang in ["en", "hi", "hi-en"]
+    
+    decision = apply_guards(
+        contract=contract,
+        newest_policy_date=newest_date,
+        lang_ok=lang_ok
+    )
+    
+    # 6. Return answer or fallback response
+    processing_time = round((time.time() - start_time) * 1000, 2)
+    
+    # Update stats in background
+    background_tasks.add_task(
+        update_stats, 
+        intent, 
+        contract.mode == "rules", 
+        processing_time
+    )
+    
+    if decision.ok:
+        # Return successful answer
+        sources_list = []
+        for source in contract.sources:
+            sources_list.append(SourceInfo(
+                policy_id=source.policy_id,
+                url=str(source.url),
+                name=source.title,
+                page=source.page,
+                section=source.section
+            ))
+            
+        return AskResponse(
+            mode=contract.mode,
+            intent=contract.intent,
+            text=contract.answer,  # For backward compatibility
+            answer=contract.answer,
+            sources=sources_list,
+            confidence=decision.confidence,
+            processing_time=processing_time,
+            updated_date=newest_date
+        )
+    else:
+        # Create ticket if enabled
+        ticket_id = await create_ticket_if_enabled(
+            contract=contract, 
+            reasons=decision.reasons,
             session=session
         )
         
-        # Add processing time
-        response.processing_time = round((time.time() - start_time) * 1000, 2)
-        
-        # Update stats in background
-        background_tasks.add_task(
-            update_stats, 
-            intent, 
-            is_rule_based, 
-            (time.time() - start_time) * 1000
+        # Return fallback response
+        return AskResponse(
+            mode="fallback",
+            intent=contract.intent,
+            text="I'm sorry, I couldn't find a reliable answer to your question.",
+            reasons=decision.reasons,
+            ticket_id=ticket_id,
+            confidence=decision.confidence,
+            processing_time=processing_time
         )
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error in RAG pipeline: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 
 @ask_router.get("/health", response_model=HealthResponse)
