@@ -1,0 +1,11 @@
+fastapi==0.103.1
+uvicorn==0.23.2
+pydantic==2.3.0
+pydantic-settings==2.0.3
+sqlalchemy==2.0.20
+alembic==1.16.4
+python-multipart==0.0.6
+regex>=2023.8.8
+pyyaml==6.0.1
+pandas>=2.0.3
+numpy>=1.24.3
