@@ -13,8 +13,9 @@ from collections import Counter, defaultdict
 
 import numpy as np
 from rank_bm25 import BM25Okapi
-from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, SearchParams
+
+from src.core.dependencies import get_qdrant_client, get_embedding_function
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -221,8 +222,6 @@ def _get_or_create_bm25_index(policy_chunks: List[Dict[str, Any]], policy_id: Op
 
 def hybrid_retrieve(
     query: str,
-    qdrant_client: QdrantClient,
-    embedder: Any,
     collection_name: str = "a2g_chunks",
     top_k: int = 24,
     policy_id: Optional[str] = None,
@@ -239,8 +238,6 @@ def hybrid_retrieve(
     
     Args:
         query: User query string
-        qdrant_client: Initialized QdrantClient
-        embedder: Model to encode query into embedding vector
         collection_name: Name of Qdrant collection
         top_k: Number of results to retrieve
         policy_id: Optional policy ID to filter by
@@ -251,8 +248,12 @@ def hybrid_retrieve(
     """
     logger.info(f"Hybrid retrieval for query: '{query}'")
     
+    # Get singletons from dependencies
+    qdrant_client = get_qdrant_client()
+    embed_function = get_embedding_function()
+    
     # 1. Encode query
-    query_embedding = embedder.embed_texts([query])[0].tolist()
+    query_embedding = embed_function(query)
     
     # Create filter if policy_id is provided
     search_filter = None
@@ -361,21 +362,12 @@ def hybrid_retrieve(
 # Simple test function
 def test_hybrid_retrieval():
     """Test the hybrid retrieval function."""
-    from qdrant_client import QdrantClient
-    from src.ingest.embedding_indexer import EmbeddingIndexer
-    
-    # Initialize components
-    indexer = EmbeddingIndexer()
-    client = indexer.connect_qdrant()
-    
     # Test query
     query = "What is the policy for remote work?"
     
     # Call hybrid retrieve
     results = hybrid_retrieve(
         query=query,
-        qdrant_client=client,
-        embedder=indexer,
         top_k=10
     )
     
@@ -399,18 +391,9 @@ if __name__ == "__main__":
         # Use command line argument as query
         query = sys.argv[1]
         
-        # Initialize components
-        from qdrant_client import QdrantClient
-        from src.ingest.embedding_indexer import EmbeddingIndexer
-        
-        indexer = EmbeddingIndexer()
-        client = indexer.connect_qdrant()
-        
         # Call hybrid retrieve
         results = hybrid_retrieve(
             query=query,
-            qdrant_client=client,
-            embedder=indexer,
             top_k=10
         )
         

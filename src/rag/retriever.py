@@ -1,24 +1,31 @@
 from typing import List, Dict, Any, Optional
 import time
-from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
-from sentence_transformers import SentenceTransformer
+import logging
 
 from src.core.config import settings
+from src.core.dependencies import get_qdrant_client, get_embedding_function
+
+logger = logging.getLogger(__name__)
+
+# Singleton instance
+_retriever = None
+
+
+def get_retriever():
+    """Get or initialize retriever singleton."""
+    global _retriever
+    if _retriever is None:
+        _retriever = Retriever()
+    return _retriever
 
 
 class Retriever:
     def __init__(self):
-        self.client = QdrantClient(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT
-        )
+        logger.info("Initializing Retriever")
+        self.client = get_qdrant_client()
         self.collection_name = settings.QDRANT_COLLECTION_NAME
-        self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
-    
-    def embed_query(self, query: str) -> List[float]:
-        """Embed the query text."""
-        return self.embedding_model.encode(query).tolist()
+        self.embed_query = get_embedding_function()
     
     async def retrieve(
         self, 
@@ -72,14 +79,11 @@ class Retriever:
         return results
 
 
-# Create a singleton instance
-retriever = Retriever()
-
-
 async def retrieve_documents(
     query: str, 
     limit: int = 5,
     filters: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """Retrieve documents based on query."""
+    retriever = get_retriever()
     return await retriever.retrieve(query, limit, filters)

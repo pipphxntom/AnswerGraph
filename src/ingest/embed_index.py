@@ -13,6 +13,7 @@ from qdrant_client.http.models import (
 
 from src.core.config import settings
 from src.core.db import get_session, Base
+from src.core.dependencies import get_embedding_model, get_qdrant_client
 from src.models.chunk import Chunk
 
 logger = logging.getLogger(__name__)
@@ -33,14 +34,11 @@ class EmbedIndex:
             "collection_name", 
             settings.QDRANT_COLLECTION_NAME
         )
-        self.embedding_model = SentenceTransformer(self.embedding_model_name)
-        self.vector_size = self.embedding_model.get_sentence_embedding_dimension()
         
-        # Connect to Qdrant
-        self.qdrant_client = QdrantClient(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT
-        )
+        # Use singletons from dependencies
+        self.embedding_model = get_embedding_model()
+        self.vector_size = self.embedding_model.get_sentence_embedding_dimension()
+        self.qdrant_client = get_qdrant_client()
         
         logger.info(
             f"Initialized EmbedIndex with model={self.embedding_model_name}, "
@@ -272,7 +270,15 @@ class EmbedIndex:
 
 
 # Create a singleton instance for easy import
-embed_indexer = EmbedIndex()
+# This will be lazily initialized when first accessed
+_embed_indexer = None
+
+def get_embed_indexer() -> EmbedIndex:
+    """Get the singleton EmbedIndex instance."""
+    global _embed_indexer
+    if _embed_indexer is None:
+        _embed_indexer = EmbedIndex()
+    return _embed_indexer
 
 
 async def index_document_chunks(chunks: List[Dict[str, Any]]) -> List[str]:
@@ -281,4 +287,5 @@ async def index_document_chunks(chunks: List[Dict[str, Any]]) -> List[str]:
     
     This is a convenience function that uses the singleton instance.
     """
-    return await embed_indexer.index_chunks(chunks)
+    indexer = get_embed_indexer()
+    return await indexer.index_chunks(chunks)

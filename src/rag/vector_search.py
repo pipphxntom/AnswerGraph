@@ -13,7 +13,8 @@ from pathlib import Path
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from src.ingest.embedding_indexer import EmbeddingIndexer
+from src.core.dependencies import get_embedding_model, get_qdrant_client
+from src.core.config import settings
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
 # Configure logging
@@ -26,7 +27,7 @@ async def search_policies(
     query: str,
     top_k: int = 5,
     policy_id: Optional[str] = None,
-    collection_name: str = "a2g_chunks"
+    collection_name: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Search for policy chunks using vector similarity.
@@ -35,17 +36,21 @@ async def search_policies(
         query: Query string
         top_k: Number of results to return
         policy_id: Optional policy ID to filter by
-        collection_name: Qdrant collection name
+        collection_name: Qdrant collection name (defaults to settings value)
         
     Returns:
         List of search results with metadata
     """
-    # Create indexer
-    indexer = EmbeddingIndexer(collection_name=collection_name)
-    client = indexer.connect_qdrant()
+    # Get the Qdrant client and embedding model from dependencies
+    client = get_qdrant_client()
+    embedding_model = get_embedding_model()
+    
+    # Use default collection name if not provided
+    if collection_name is None:
+        collection_name = settings.QDRANT_COLLECTION_NAME
     
     # Embed query
-    query_embedding = indexer.embed_texts([query])[0].tolist()
+    query_embedding = embedding_model.encode(query).tolist()
     
     # Create filter if policy_id is provided
     search_filter = None
@@ -93,6 +98,11 @@ async def main():
     parser.add_argument("--collection", default="a2g_chunks", help="Qdrant collection name")
     
     args = parser.parse_args()
+    
+    # Initialize singletons if running as script
+    from src.core.dependencies import init_embedding_model, init_qdrant_client
+    init_embedding_model()
+    init_qdrant_client()
     
     # Search
     results = await search_policies(

@@ -1,14 +1,17 @@
 from typing import List, Dict, Any, Union, Tuple
 import numpy as np
 from sentence_transformers import CrossEncoder
+import logging
 
-# CrossEncoder models for reranking
-DEFAULT_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-MXBAI_MODEL = "mixedbread-ai/mxbai-rerank-large-v1"
+from src.core.config import settings
+from src.core.dependencies import get_cross_encoder, DEFAULT_RERANKER_MODEL, DEFAULT_CROSS_ENCODER_MODEL
+
+logger = logging.getLogger(__name__)
 
 
 class Reranker:
-    def __init__(self, model_name: str = DEFAULT_MODEL):
+    def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL):
+        logger.info(f"Initializing reranker model: {model_name}")
         self.model = CrossEncoder(model_name, max_length=512)
     
     def rerank(self, query: str, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -36,7 +39,7 @@ def cross_encode_rerank(
     query: str, 
     candidates: List[Dict[str, Any]], 
     top_n: int = 8,
-    model_name: str = MXBAI_MODEL
+    model_name: str = DEFAULT_CROSS_ENCODER_MODEL
 ) -> List[Dict[str, Any]]:
     """
     Rerank candidates using a cross-encoder model.
@@ -53,8 +56,8 @@ def cross_encode_rerank(
     if not candidates:
         return []
     
-    # Initialize cross-encoder
-    cross_encoder = CrossEncoder(model_name, max_length=512)
+    # Get cross-encoder singleton from dependencies
+    cross_encoder = get_cross_encoder(model_name)
     
     # Create pairs for scoring
     text_field = "text" if "text" in candidates[0] else "content"
@@ -78,8 +81,6 @@ def cross_encode_rerank(
 
 def rerank_documents(query: str, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rerank documents based on query."""
+    from src.core.dependencies import get_reranker
+    reranker = get_reranker()
     return reranker.rerank(query, documents)
-
-
-# Create a singleton instance
-reranker = Reranker()
