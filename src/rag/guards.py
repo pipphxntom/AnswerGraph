@@ -4,10 +4,14 @@ import datetime
 from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+import logging
 
 # Import models
 from src.models.policy import Policy
 from src.models.source import Source
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 def validate_query(query: str) -> Dict[str, Any]:
@@ -108,17 +112,24 @@ def check_information_quality(content: str) -> Dict[str, Any]:
     }
 
 
-def require_citation(answer: Dict[str, Any]) -> Tuple[bool, str]:
+def require_citation(answer_contract: Dict[str, Any]) -> Tuple[bool, str]:
     """
     Verify that the answer contains at least one source citation with URL and page.
     
     Args:
-        answer: Dictionary containing the answer and its metadata
+        answer_contract: Dictionary containing the answer and its metadata
         
     Returns:
         Tuple of (passed, message) where passed is True if the guard passes
     """
-    sources = answer.get("sources", [])
+    # Handle both RAG and Rules path contract formats
+    if "sources" in answer_contract:
+        sources = answer_contract.get("sources", [])
+    elif "source" in answer_contract:
+        # Rules path format - single source
+        sources = [answer_contract.get("source", {})]
+    else:
+        return False, "Answer lacks any source citations"
     
     if not sources:
         return False, "Answer lacks any source citations"
@@ -273,72 +284,267 @@ def numeric_consistency(answer_text: str, evidence_texts: List[str]) -> Tuple[bo
     return True, f"All {len(answer_values)} numeric values in answer are supported by evidence", []
 
 
-def confidence_gate(
-    margin: float, 
-    coverage: float, 
-    lang_ok: bool, 
-    factual_score: Optional[float] = None,
-    source_quality: Optional[float] = None
-) -> Tuple[bool, float, str]:
+def disambiguation_guard(
+    answer_text: str, 
+    query: str,
+    min_confidence: float = 0.7
+) -> Tuple[bool, str, Dict[str, Any]]:
     """
-    Compute final confidence score and apply thresholding.
+    Check if the answer is likely to need disambiguation due to ambiguity in the query.
     
-    This function combines multiple quality signals to determine if the answer
-    meets the quality threshold for being returned to the user.
+    This guard identifies when a query might have multiple valid interpretations
+    and suggests disambiguation options.
     
     Args:
-        margin: Confidence margin (typically from retrieval scores)
-        coverage: How much of the answer is covered by evidence (0.0-1.0)
-        lang_ok: Whether the language quality check passed
-        factual_score: Optional factual consistency score (0.0-1.0)
-        source_quality: Optional source quality score (0.0-1.0)
+        answer_text: The generated answer text
+        query: The original user query
+        min_confidence: Minimum confidence threshold to consider the answer unambiguous
         
     Returns:
-        Tuple of (passed, final_score, message) where:
-        - passed is True if the confidence gate passes
-        - final_score is the computed confidence score
+        Tuple of (passed, message, details) where:
+        - passed is True if the answer is unambiguous
         - message explains the result
+        - details contains disambiguation options if any
     """
-    # Weights for different components
-    weights = {
-        "margin": 0.3,
-        "coverage": 0.3,
-        "lang": 0.1,
-        "factual": 0.2,
-        "source": 0.1
+    # Patterns that suggest ambiguity
+    ambiguity_patterns = [
+        r"(?i)there\s+are\s+(?:several|multiple|many|different)\s+(?:types|kinds|ways|interpretations)",
+        r"(?i)your\s+question\s+could\s+(?:be interpreted|refer to|mean)\s+(?:in|as)",
+        r"(?i)(?:did you mean|are you asking about|do you want to know about)",
+        r"(?i)(?:unclear|ambiguous|vague)",
+        r"(?i)(?:could you clarify|could you specify|can you provide more details)",
+    ]
+    
+    # Check for ambiguity indicators in the answer
+    confidence = 1.0
+    ambiguity_matches = []
+    
+    for pattern in ambiguity_patterns:
+        matches = re.findall(pattern, answer_text)
+        if matches:
+            ambiguity_matches.extend(matches)
+            # Reduce confidence with each ambiguity indicator
+            confidence *= 0.8
+    
+    # Count question marks in the answer (too many suggests clarification questions)
+    question_marks = answer_text.count("?")
+    if question_marks > 2:
+        confidence *= (1.0 - (question_marks - 2) * 0.1)  # Decrease confidence for excessive questions
+    
+    # Extract potential disambiguation options
+    options = []
+    option_pattern = r"(?:1\.\s+|•\s+|Option\s+\d+:\s+|-)([^\\n.]{5,100})"
+    option_matches = re.findall(option_pattern, answer_text)
+    
+    if option_matches:
+        options = [opt.strip() for opt in option_matches]
+    
+    # Final determination
+    details = {
+        "confidence": confidence,
+        "ambiguity_indicators": ambiguity_matches,
+        "question_count": question_marks,
+        "disambiguation_options": options
     }
     
-    # Calculate the base score
-    score_components = {
-        "margin": min(max(margin, 0.0), 1.0),  # Clip to 0-1 range
-        "coverage": coverage,
-        "lang": 1.0 if lang_ok else 0.0
-    }
-    
-    # Add optional components if provided
-    if factual_score is not None:
-        score_components["factual"] = factual_score
+    if confidence < min_confidence:
+        return False, f"Answer suggests ambiguity (confidence: {confidence:.2f})", details
     else:
-        # Redistribute weight if factual score is not provided
-        weights["margin"] += weights["factual"] * 0.5
-        weights["coverage"] += weights["factual"] * 0.5
-        weights["factual"] = 0.0
+        return True, f"Answer appears unambiguous (confidence: {confidence:.2f})", details
+
+
+async def apply_guards(
+    answer_contract: Dict[str, Any], 
+    evidence_texts: List[str] = None,
+    session: Optional[AsyncSession] = None,
+    guards_to_apply: List[str] = None,
+    fail_fast: bool = False,
+    query: str = None
+) -> Tuple[bool, List[str], Dict[str, Any]]:
+    """
+    Apply all guards to an answer contract and return if it passes.
+    
+    Args:
+        answer_contract: The answer contract to check
+        evidence_texts: List of evidence texts used to generate the answer
+        session: Optional database session for guards that need database access
+        guards_to_apply: Optional list of specific guards to apply (default: all guards)
+        fail_fast: If True, stop applying guards after first failure
+        query: Original user query (needed for disambiguation guard)
         
-    if source_quality is not None:
-        score_components["source"] = source_quality
-    else:
-        # Redistribute weight if source quality is not provided
-        weights["margin"] += weights["source"] * 0.5
-        weights["coverage"] += weights["source"] * 0.5
-        weights["source"] = 0.0
+    Returns:
+        Tuple of (passed, reasons, details) where:
+        - passed is True if all guards pass
+        - reasons is a list of messages explaining which guards passed/failed
+        - details is a dictionary with detailed results from each guard
+    """
+    # Default: apply all guards
+    all_guards = ["citation", "staleness", "numeric", "temporal", "disambiguation"]
+    guards_to_apply = guards_to_apply or all_guards
     
-    # Calculate weighted score
-    final_score = sum(score * weights[key] for key, score in score_components.items())
+    reasons = []
+    details = {}
+    all_passed = True
     
-    # Threshold for acceptance (adjustable)
-    threshold = 0.6
-    
-    if final_score >= threshold:
-        return True, final_score, f"Confidence score {final_score:.2f} meets threshold {threshold:.2f}"
-    else:
-        return False, final_score, f"Confidence score {final_score:.2f} below threshold {threshold:.2f}"
+    try:
+        # Validate input
+        if not answer_contract:
+            return False, ["Invalid answer contract: empty or null"], {"error": "Invalid input"}
+            
+        # 1. Citation guard - ensure URL and page are present
+        if "citation" in guards_to_apply:
+            try:
+                citation_passed, citation_msg = require_citation(answer_contract)
+                reasons.append(f"Citation Guard: {citation_msg}")
+                details["citation"] = {"passed": citation_passed, "message": citation_msg}
+                
+                if not citation_passed:
+                    all_passed = False
+                    if fail_fast:
+                        return False, reasons, details
+            except Exception as e:
+                error_msg = f"Citation Guard: Error - {str(e)}"
+                logger.error(error_msg)
+                reasons.append(error_msg)
+                details["citation"] = {"passed": False, "message": error_msg, "error": str(e)}
+                all_passed = False
+                if fail_fast:
+                    return False, reasons, details
+        
+        # 2. Staleness guard - check source date
+        if "staleness" in guards_to_apply:
+            try:
+                source_date = None
+                if "source" in answer_contract and "updated_at" in answer_contract["source"]:
+                    source_date = answer_contract["source"]["updated_at"]
+                elif "sources" in answer_contract and answer_contract["sources"]:
+                    # Get the most recent source date from the list
+                    dates = [s.get("updated_at") for s in answer_contract["sources"] if "updated_at" in s]
+                    if dates:
+                        source_date = max(dates)
+                
+                if source_date:
+                    staleness_passed, staleness_msg = staleness_guard(source_date)
+                    reasons.append(f"Staleness Guard: {staleness_msg}")
+                    details["staleness"] = {"passed": staleness_passed, "message": staleness_msg, "source_date": source_date}
+                    
+                    if not staleness_passed:
+                        all_passed = False
+                        if fail_fast:
+                            return False, reasons, details
+                else:
+                    skip_msg = "Staleness Guard: Skipped (no source date found)"
+                    reasons.append(skip_msg)
+                    details["staleness"] = {"passed": True, "message": skip_msg, "skipped": True}
+            except Exception as e:
+                error_msg = f"Staleness Guard: Error - {str(e)}"
+                logger.error(error_msg)
+                reasons.append(error_msg)
+                details["staleness"] = {"passed": False, "message": error_msg, "error": str(e)}
+                all_passed = False
+                if fail_fast:
+                    return False, reasons, details
+        
+        # 3. Numeric consistency guard - if evidence is provided
+        if "numeric" in guards_to_apply:
+            try:
+                if evidence_texts and "text" in answer_contract:
+                    num_passed, num_msg, missing = numeric_consistency(answer_contract["text"], evidence_texts)
+                    reasons.append(f"Numeric Consistency Guard: {num_msg}")
+                    details["numeric"] = {
+                        "passed": num_passed, 
+                        "message": num_msg, 
+                        "missing_values": missing
+                    }
+                    
+                    if not num_passed:
+                        all_passed = False
+                        reasons.extend([f"- Missing: {item}" for item in missing])
+                        if fail_fast:
+                            return False, reasons, details
+                else:
+                    skip_msg = "Numeric Consistency Guard: Skipped (no evidence texts provided or no answer text)"
+                    reasons.append(skip_msg)
+                    details["numeric"] = {"passed": True, "message": skip_msg, "skipped": True}
+            except Exception as e:
+                error_msg = f"Numeric Consistency Guard: Error - {str(e)}"
+                logger.error(error_msg)
+                reasons.append(error_msg)
+                details["numeric"] = {"passed": False, "message": error_msg, "error": str(e)}
+                all_passed = False
+                if fail_fast:
+                    return False, reasons, details
+        
+        # 4. Temporal guard - if session is provided
+        if "temporal" in guards_to_apply:
+            try:
+                if session and "sources" in answer_contract and answer_contract["sources"]:
+                    temporal_passed, temporal_msg, outdated_sources = await temporal_guard(answer_contract["sources"], session)
+                    reasons.append(f"Temporal Guard: {temporal_msg}")
+                    details["temporal"] = {
+                        "passed": temporal_passed, 
+                        "message": temporal_msg,
+                        "outdated_sources": outdated_sources
+                    }
+                    
+                    if not temporal_passed:
+                        all_passed = False
+                        if fail_fast:
+                            return False, reasons, details
+                else:
+                    skip_msg = "Temporal Guard: Skipped (no database session or sources provided)"
+                    reasons.append(skip_msg)
+                    details["temporal"] = {"passed": True, "message": skip_msg, "skipped": True}
+            except Exception as e:
+                error_msg = f"Temporal Guard: Error - {str(e)}"
+                logger.error(error_msg)
+                reasons.append(error_msg)
+                details["temporal"] = {"passed": False, "message": error_msg, "error": str(e)}
+                all_passed = False
+                if fail_fast:
+                    return False, reasons, details
+        
+        # 5. Disambiguation guard - check if answer suggests ambiguity
+        if "disambiguation" in guards_to_apply:
+            try:
+                if query and "text" in answer_contract:
+                    disambiguation_passed, disambiguation_msg, disambiguation_details = disambiguation_guard(
+                        answer_contract["text"], 
+                        query
+                    )
+                    reasons.append(f"Disambiguation Guard: {disambiguation_msg}")
+                    details["disambiguation"] = {
+                        "passed": disambiguation_passed,
+                        "message": disambiguation_msg,
+                        **disambiguation_details
+                    }
+                    
+                    # Note: We don't fail the overall check for disambiguation
+                    # Instead, we use this to add disambiguation options to the response
+                    # So we don't set all_passed = False here
+                else:
+                    skip_msg = "Disambiguation Guard: Skipped (no query or answer text provided)"
+                    reasons.append(skip_msg)
+                    details["disambiguation"] = {"passed": True, "message": skip_msg, "skipped": True}
+            except Exception as e:
+                error_msg = f"Disambiguation Guard: Error - {str(e)}"
+                logger.error(error_msg)
+                reasons.append(error_msg)
+                details["disambiguation"] = {"passed": True, "message": error_msg, "error": str(e)}
+                # We don't fail for disambiguation errors
+        
+        # Add overall validation summary
+        details["overall"] = {
+            "passed": all_passed,
+            "guards_applied": guards_to_apply,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        
+        # Return the final result
+        return all_passed, reasons, details
+        
+    except Exception as e:
+        # Catch any unexpected errors
+        error_msg = f"Unexpected error in guard application: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return False, [error_msg], {"error": str(e), "overall": {"passed": False}}
