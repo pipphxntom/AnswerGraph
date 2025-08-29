@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16
+    container_name: a2g-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: a2g
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Qdrant vector database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: a2g-qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # API service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: a2g-api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/a2g
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-a2g-admin-key}
+      - DEBUG=False
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./sample_data:/app/sample_data
+      - ./static:/app/static
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  qdrant_data:
