@@ -5,28 +5,26 @@ pydantic-settings==2.0.3
 sqlalchemy==2.0.20
 asyncpg==0.28.0
 alembic==1.16.4
-sentence-transformers==2.2.2
-qdrant-client==1.6.0
-pandas==2.0.3
+sentence-transformers>=2.2.2
+qdrant-client>=1.7.0
+pandas>=2.0.3
 openpyxl==3.1.2
-pymupdf==1.22.5
+pymupdf>=1.22.5
 python-bidi==0.4.2
 python-multipart==0.0.6
-regex==2023.8.8
-numpy==1.24.3
+regex>=2023.8.8
+numpy>=1.24.3
 pyyaml==6.0.1
-tiktoken==0.5.1
-rapidfuzz==3.5.2
-transformers==4.36.2
-torch==2.1.2
-accelerate==0.25.0
+tiktoken>=0.5.1
+rapidfuzz>=3.5.2
+transformers>=4.36.2
+torch>=2.1.2
+accelerate>=0.25.0
 rank_bm25==0.2.2
-einops==0.7.0
-cld3==0.2.8
-pytest==7.4.0
-pytest-asyncio==0.21.1
-aiohttp==3.8.5
-# For running Qwen2 efficiently
-optimum==1.14.0
-auto-gptq==0.5.1
-flash-attn==2.3.4
+einops>=0.7.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.1
+aiohttp>=3.8.5
+# Commented out problematic packages
+# optimum>=1.14.0
+# auto-gptq>=0.5.1
