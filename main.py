@@ -2,10 +2,14 @@ import uvicorn
 from typing import Optional, Dict, Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 import logging
+import os
 
 from src.api.routes import router as api_router
 from src.api.pdf_routes import router as pdf_router
+from src.api.admin_routes import admin_router
 from src.core.config import settings
 from src.core.dependencies import (
     get_qdrant_client, 
@@ -73,6 +77,17 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> FastAPI:
     # Include all routers
     app.include_router(api_router, prefix=app_settings.API_V1_STR)
     app.include_router(pdf_router, prefix=app_settings.API_V1_STR)
+    app.include_router(admin_router, prefix=app_settings.API_V1_STR)
+    
+    # Mount static files directory
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    if os.path.exists(static_dir):
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    
+    # Add root endpoint to redirect to UI
+    @app.get("/")
+    async def root():
+        return RedirectResponse(url="/static/index.html")
     
     # Add startup and shutdown events
     @app.on_event("startup")

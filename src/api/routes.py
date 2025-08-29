@@ -20,6 +20,17 @@ router = APIRouter()
 router.include_router(ask_router, tags=["ask"])
 
 
+class HealthResponse(BaseModel):
+    """Model for health check response."""
+    status: str = "ok"
+
+
+@router.get("/health", response_model=HealthResponse, tags=["health"])
+async def health_check():
+    """Health check endpoint for the API."""
+    return HealthResponse()
+
+
 class QueryRequest(BaseModel):
     """Model for query requests."""
     query: str

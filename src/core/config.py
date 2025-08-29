@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Embedding model
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     
+    # Admin settings
+    ADMIN_API_KEY: str = "a2g-admin-key"  # Change this in production!
+    
     @validator("CORS_ORIGINS", pre=True)
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
         if isinstance(v, str) and not v.startswith("["):
