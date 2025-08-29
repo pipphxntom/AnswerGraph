@@ -74,6 +74,20 @@ class Retriever:
             payload["id"] = res.id
             payload["score"] = res.score
             payload["processing_time"] = time.time() - start_time
+            
+            # Ensure consistent field names
+            if "content" not in payload and "text" in payload:
+                payload["content"] = payload["text"]
+            
+            if "url" not in payload and "source_url" in payload:
+                payload["url"] = payload["source_url"]
+                
+            if "page" not in payload and "page_number" in payload:
+                payload["page"] = payload["page_number"]
+                
+            if "title" not in payload and "source_name" in payload:
+                payload["title"] = payload["source_name"]
+            
             results.append(payload)
         
         return results

@@ -72,6 +72,20 @@ def cross_encode_rerank(
         doc["original_score"] = doc.get("score", 0.0)
         doc["cross_encoder_score"] = float(scores[i])
         doc["final_score"] = float(scores[i])  # Use cross-encoder score as final
+        doc["score"] = float(scores[i])  # Update the main score field
+        
+        # Ensure consistent field names
+        if "content" not in doc and "text" in doc:
+            doc["content"] = doc["text"]
+        
+        if "url" not in doc and "source_url" in doc:
+            doc["url"] = doc["source_url"]
+            
+        if "page" not in doc and "page_number" in doc:
+            doc["page"] = doc["page_number"]
+            
+        if "title" not in doc and "source_name" in doc:
+            doc["title"] = doc["source_name"]
     
     # Sort by cross-encoder score and take top_n
     reranked = sorted(candidates, key=lambda x: x["cross_encoder_score"], reverse=True)[:top_n]
