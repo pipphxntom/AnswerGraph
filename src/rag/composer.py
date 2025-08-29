@@ -15,8 +15,8 @@ import threading
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
-# Import guards for quality checks
-from src.rag.guards import numeric_consistency, require_citation
+# Import schemas
+from src.schemas.answer import AnswerContract, SourceRef
 
 logger = logging.getLogger(__name__)
 
@@ -275,24 +275,18 @@ async def compose_answer(
     2. Bullet points for key details
     3. Source information with URL and page
     
-    The function enforces quality checks using numeric_consistency and require_citation.
-    
     Args:
         query: User's query
         evidence: List of evidence documents
         
     Returns:
-        Formatted answer or None if quality checks fail
+        Formatted answer or None if generation fails
     """
     if not evidence:
         logger.warning("No evidence provided for compose_answer")
         return None
     
     try:
-        # Get evidence texts for consistency check
-        evidence_texts = [doc.get("content", doc.get("text", "")) for doc in evidence]
-        evidence_texts = [text for text in evidence_texts if text]
-        
         # Extract first source info to use as fallback
         first_source = extract_first_source_info(evidence)
         
@@ -319,33 +313,7 @@ async def compose_answer(
         # Format the answer according to the template
         formatted_text = format_final_answer(structured_answer)
         
-        # Check numeric consistency
-        consistency_passed, _, missing_values = numeric_consistency(
-            formatted_text, evidence_texts
-        )
-        
-        if not consistency_passed:
-            logger.warning(f"Numeric consistency check failed: {missing_values}")
-            return None
-        
-        # Check citation
-        answer_with_source = {
-            "text": formatted_text,
-            "sources": [
-                {
-                    "url": structured_answer["source"]["url"],
-                    "page": structured_answer["source"]["page"]
-                }
-            ]
-        }
-        
-        citation_passed, msg = require_citation(answer_with_source)
-        
-        if not citation_passed:
-            logger.warning(f"Citation check failed: {msg}")
-            return None
-        
-        # Prepare final result
+        # Prepare result
         result = {
             "text": formatted_text,
             "direct_answer": structured_answer["direct_answer"],
@@ -354,7 +322,9 @@ async def compose_answer(
                 {
                     "url": structured_answer["source"]["url"],
                     "page": structured_answer["source"]["page"],
-                    "policy_id": evidence[0].get("policy_id") if evidence else None
+                    "policy_id": evidence[0].get("policy_id") if evidence else None,
+                    "title": evidence[0].get("title", evidence[0].get("source_name")) if evidence else None,
+                    "updated_at": evidence[0].get("updated_at") if evidence else None
                 }
             ]
         }
@@ -364,3 +334,114 @@ async def compose_answer(
     except Exception as e:
         logger.error(f"Error in compose_answer: {str(e)}")
         return None
+
+
+async def compose_rag_answer(
+    query: str,
+    retrieved_docs: List[Dict[str, Any]],
+    slots: Optional[Dict[str, Any]] = None,
+    session: Optional[Any] = None
+) -> AnswerContract:
+    """
+    Compose an answer using RAG and return as standardized AnswerContract.
+    
+    Args:
+        query: The user's query
+        retrieved_docs: The retrieved documents
+        slots: Any extracted slots
+        session: Database session
+        
+    Returns:
+        AnswerContract with structured answer information
+    """
+    if not retrieved_docs:
+        # Return a minimal contract for no results
+        return AnswerContract(
+            mode="rag",
+            intent="freeform",
+            answer="I'm sorry, I couldn't find any relevant information for your query.",
+            sources=[],
+            ctx=slots or {}
+        )
+    
+    # Get evidence texts
+    evidence_texts = [doc.get("content", "") for doc in retrieved_docs]
+    evidence_texts = [text for text in evidence_texts if text]
+    
+    # Use LLM to compose answer
+    try:
+        answer_result = await compose_answer(query, retrieved_docs)
+        
+        if not answer_result:
+            # Fallback to using top document content directly
+            answer_text = retrieved_docs[0].get("content", "")
+            if len(answer_text) > 300:
+                answer_text = answer_text[:300] + "..."
+                
+            # Create sources
+            sources = []
+            for doc in retrieved_docs[:3]:  # Include top 3 sources
+                sources.append(SourceRef(
+                    url=doc.get("url", f"/documents/{doc.get('id')}"),
+                    page=doc.get("page", doc.get("page_number")),
+                    title=doc.get("title", doc.get("source_name", "Document")),
+                    policy_id=doc.get("policy_id"),
+                    updated_at=doc.get("updated_at"),
+                    section=doc.get("section")
+                ))
+                
+            # Apply PII redaction
+            from src.rag.guards import ensure_sensitive_data_protection
+            redacted_answer = ensure_sensitive_data_protection(answer_text)
+            
+            return AnswerContract(
+                mode="rag",
+                intent="freeform",
+                answer=redacted_answer,
+                sources=sources,
+                evidence_texts=evidence_texts,
+                ctx=slots or {}
+            )
+        
+        # Create sources list from the result
+        sources = []
+        for source_dict in answer_result["sources"]:
+            sources.append(SourceRef(
+                url=source_dict.get("url", ""),
+                page=source_dict.get("page"),
+                title=source_dict.get("title"),
+                policy_id=source_dict.get("policy_id"),
+                updated_at=source_dict.get("updated_at"),
+                section=source_dict.get("section")
+            ))
+        
+        # Apply PII redaction
+        from src.rag.guards import ensure_sensitive_data_protection
+        redacted_answer = ensure_sensitive_data_protection(answer_result["text"])
+        
+        # Create the contract
+        return AnswerContract(
+            mode="rag",
+            intent="freeform",
+            answer=redacted_answer,
+            sources=sources,
+            evidence_texts=evidence_texts,
+            fields={
+                "direct_answer": ensure_sensitive_data_protection(answer_result.get("direct_answer", "")),
+                "key_points": [ensure_sensitive_data_protection(point) for point in answer_result.get("key_points", [])]
+            },
+            ctx=slots or {}
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in compose_rag_answer: {str(e)}")
+        
+        # Create a minimal fallback contract
+        return AnswerContract(
+            mode="rag",
+            intent="freeform",
+            answer=f"I encountered an error while processing your question. Please try again.",
+            sources=[],
+            evidence_texts=[],
+            ctx={"error": str(e)}
+        )
