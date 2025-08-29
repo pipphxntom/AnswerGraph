@@ -9,6 +9,7 @@ import logging
 # Import models
 from src.models.policy import Policy
 from src.models.source import Source
+from src.schemas.answer import AnswerContract, GuardDecision
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -149,7 +150,110 @@ def require_citation(answer_contract: Dict[str, Any]) -> Tuple[bool, str]:
     return True, f"Answer contains {valid_sources} valid source citations"
 
 
-async def temporal_guard(sources: List[Dict[str, Any]], session: AsyncSession) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+def staleness_guard(source_date_str: Optional[str], max_age_days: int = 365) -> Tuple[bool, str]:
+    """
+    Check if a source is too old to be considered reliable.
+    
+    Args:
+        source_date_str: ISO format date string (YYYY-MM-DD)
+        max_age_days: Maximum age in days for a source to be fresh
+        
+    Returns:
+        Tuple of (passed, message) where passed is True if the guard passes
+    """
+    if not source_date_str:
+        return False, "No source date provided to check freshness"
+    
+    try:
+        # Parse the date string
+        source_date = datetime.datetime.fromisoformat(source_date_str.replace('Z', '+00:00'))
+        
+        # Convert to date only if it's a datetime
+        if isinstance(source_date, datetime.datetime):
+            source_date = source_date.date()
+        
+        # Calculate the age
+        today = datetime.date.today()
+        age_days = (today - source_date).days
+        
+        # Check if it's too old
+        if age_days > max_age_days:
+            return False, f"Source is {age_days} days old (max allowed: {max_age_days})"
+        
+        return True, f"Source is {age_days} days old (within {max_age_days} day limit)"
+    
+    except Exception as e:
+        logger.error(f"Error in staleness guard: {str(e)}")
+        return False, f"Invalid date format: {source_date_str}"
+
+
+def apply_guards(contract: AnswerContract,
+                 newest_policy_date: Optional[str],
+                 lang_ok: bool,
+                 max_age_days: int = 365) -> GuardDecision:
+    """
+    Apply all guards to an answer contract and return a structured decision.
+    
+    This is the main guard orchestrator that should be used for both
+    rule-based and RAG-based answers.
+    
+    Args:
+        contract: The answer contract to check
+        newest_policy_date: The date of the newest policy (ISO format)
+        lang_ok: Whether the language of the answer is acceptable
+        max_age_days: Maximum age in days for a source to be considered fresh
+        
+    Returns:
+        GuardDecision with validation result and reasons
+    """
+    reasons, ok = [], True
+    
+    # 1. Citation guard - ensure URL and page are present
+    citation_passed, _ = require_citation(contract.model_dump())
+    if not citation_passed: 
+        ok = False
+        reasons.append("no_citation")
+    
+    # 2. Numeric consistency guard - check numbers in answer match evidence
+    if contract.evidence_texts:
+        num_passed, _, _ = numeric_consistency(contract.answer, contract.evidence_texts)
+        if not num_passed:
+            ok = False
+            reasons.append("numeric_mismatch")
+    
+    # 3. Temporal guard - check dates in answer for logical consistency
+    if contract.sources:
+        sources_dict = [source.model_dump() for source in contract.sources]
+        temporal_passed, _, _ = temporal_guard(sources_dict)
+        if not temporal_passed:
+            ok = False
+            reasons.append("temporal_violation")
+    
+    # 4. Staleness guard - check if sources are recent enough
+    if newest_policy_date:
+        stale_passed, _ = staleness_guard(newest_policy_date, max_age_days)
+        if not stale_passed:
+            ok = False
+            reasons.append("stale_source")
+    
+    # 5. Language check
+    if not lang_ok:
+        reasons.append("lang_mismatch")
+    
+    # Calculate confidence penalty based on failures
+    penalty = 0.0
+    penalty += 0.2 * ("no_citation" in reasons)
+    penalty += 0.2 * ("numeric_mismatch" in reasons)
+    penalty += 0.2 * ("temporal_violation" in reasons)
+    penalty += 0.2 * ("stale_source" in reasons)
+    penalty += 0.1 * ("lang_mismatch" in reasons)
+    
+    confidence = max(0.0, 1.0 - penalty)
+    
+    return GuardDecision(ok=ok, reasons=reasons, confidence=confidence)
+
+
+async def temporal_guard(sources: List[Dict[str, Any]], session: AsyncSession = None) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """
     Check temporal validity of sources used in the answer.
     
