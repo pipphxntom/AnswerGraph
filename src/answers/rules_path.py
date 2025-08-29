@@ -6,43 +6,117 @@ for common structured queries where exact, factual answers are available.
 """
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, join
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 import logging
+from pydantic import HttpUrl
 
 from src.models.policy import Policy
 from src.models.procedure import Procedure
 from src.models.source import Source
+from src.schemas.answer import AnswerContract, SourceRef
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Define contract for rule-based answers
-class AnswerContract:
-    """Contract for rule-based answers with structured data and source information."""
-    
-    def __init__(
-        self, 
-        answer: str, 
-        fields: Dict[str, Any], 
-        source: Dict[str, Any]
-    ):
-        self.answer = answer
-        self.fields = fields
-        self.source = source
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert the answer contract to a dictionary."""
-        return {
-            "answer": self.answer,
-            "fields": self.fields,
-            "source": self.source
-        }
-
-
 class NoAnswer(Exception):
     """Exception raised when no answer can be provided for a rule-based query."""
     pass
+
+
+async def fetch_clause_text(url: str, page: Optional[int], session: AsyncSession) -> List[str]:
+    """
+    Fetch the text of a policy clause by URL and page.
+    
+    Args:
+        url: The URL of the source document
+        page: The page number in the document
+        session: Database session
+        
+    Returns:
+        List of relevant text chunks from the source
+    """
+    try:
+        # Build the query to find source and associated chunks
+        stmt = select(Source).where(Source.url == str(url))
+        
+        if page is not None:
+            stmt = stmt.where(Source.page_count >= page)
+            
+        result = await session.execute(stmt)
+        source = result.scalars().first()
+        
+        if not source:
+            logger.warning(f"No source found for URL: {url}")
+            return ["No source document found for this reference."]
+        
+        # Get policy_id and then fetch chunks
+        policy_id = source.policy_id
+        
+        if policy_id:
+            from src.models.chunk import Chunk
+            
+            # First try exact page match
+            chunk_stmt = select(Chunk).where(
+                Chunk.policy_id == policy_id
+            )
+            
+            if page is not None:
+                chunk_stmt = chunk_stmt.where(Chunk.page_number == page)
+                
+            chunk_stmt = chunk_stmt.limit(2)  # Get 1-2 most relevant chunks
+            
+            chunk_result = await session.execute(chunk_stmt)
+            chunks = chunk_result.scalars().all()
+            
+            if chunks:
+                return [chunk.content for chunk in chunks]
+            
+            # If no chunks found for the exact page, try adjacent pages
+            if page is not None:
+                # Try page-1
+                prev_page_stmt = select(Chunk).where(
+                    Chunk.policy_id == policy_id,
+                    Chunk.page_number == (page - 1 if page > 1 else 1)
+                ).limit(1)
+                
+                prev_result = await session.execute(prev_page_stmt)
+                prev_chunk = prev_result.scalars().first()
+                
+                # Try page+1
+                next_page_stmt = select(Chunk).where(
+                    Chunk.policy_id == policy_id,
+                    Chunk.page_number == (page + 1)
+                ).limit(1)
+                
+                next_result = await session.execute(next_page_stmt)
+                next_chunk = next_result.scalars().first()
+                
+                evidence = []
+                if prev_chunk:
+                    evidence.append(f"[From previous page] {prev_chunk.content}")
+                if next_chunk:
+                    evidence.append(f"[From next page] {next_chunk.content}")
+                
+                if evidence:
+                    return evidence
+            
+            # Last resort: get any chunk from this policy
+            fallback_stmt = select(Chunk).where(
+                Chunk.policy_id == policy_id
+            ).limit(1)
+            
+            fallback_result = await session.execute(fallback_stmt)
+            fallback_chunk = fallback_result.scalars().first()
+            
+            if fallback_chunk:
+                return [f"[Related content] {fallback_chunk.content}"]
+            
+        # If we reach here, we couldn't find any chunks
+        return ["No specific content found for this reference. Please refer to the source document."]
+    except Exception as e:
+        logger.error(f"Error fetching clause text: {str(e)}")
+        return ["Error retrieving content. Please refer to the source document."]
 
 
 async def answer_from_rules(
@@ -78,8 +152,41 @@ async def answer_from_rules(
         logger.warning(f"No rule handler found for intent: {intent}")
         raise NoAnswer(f"No rule handler available for intent: {intent}")
     
-    # Call the appropriate handler
-    return await intent_handlers[intent](slots, session)
+    # Call the appropriate handler and get the legacy answer contract
+    legacy_contract = await intent_handlers[intent](slots, session)
+    
+    # Convert to the new AnswerContract format
+    source = legacy_contract.source
+    source_ref = SourceRef(
+        url=source["url"],
+        page=source.get("page"),
+        title=source.get("title"),
+        updated_at=source.get("updated_at"),
+        policy_id=source.get("policy_id"),
+        section=source.get("section")
+    )
+    
+    # Fetch evidence texts for the source
+    evidence_texts = await fetch_clause_text(
+        url=source["url"],
+        page=source.get("page"),
+        session=session
+    )
+    
+    # Apply PII redaction to answer
+    from src.rag.guards import ensure_sensitive_data_protection
+    redacted_answer = ensure_sensitive_data_protection(legacy_contract.answer)
+    
+    # Create the new contract
+    return AnswerContract(
+        mode="rules",
+        intent=intent,
+        answer=redacted_answer,
+        fields=legacy_contract.fields,
+        sources=[source_ref],
+        evidence_texts=evidence_texts,
+        ctx=slots
+    )
 
 
 async def handle_fee_deadline(
@@ -162,7 +269,8 @@ async def handle_fee_deadline(
                 "url": row.url,
                 "page": page,
                 "title": row.source_title or row.title,
-                "updated_at": row.effective_from.strftime("%Y-%m-%d") if row.effective_from else None
+                "updated_at": row.effective_from.strftime("%Y-%m-%d") if row.effective_from else None,
+                "policy_id": row.policy_id if hasattr(row, "policy_id") else None
             }
         )
     
@@ -188,6 +296,7 @@ async def handle_scholarship_deadline(
             select(
                 Policy.title,
                 Policy.effective_from,
+                Policy.id.label("policy_id"),
                 Procedure.details,
                 Procedure.deadline,
                 Source.url,
@@ -244,7 +353,8 @@ async def handle_scholarship_deadline(
                 "url": row.url,
                 "page": page,
                 "title": row.source_title or row.title,
-                "updated_at": row.effective_from.strftime("%Y-%m-%d") if row.effective_from else None
+                "updated_at": row.effective_from.strftime("%Y-%m-%d") if row.effective_from else None,
+                "policy_id": row.policy_id
             }
         )
     
